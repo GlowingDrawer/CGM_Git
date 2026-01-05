@@ -6,6 +6,46 @@ void JustShow(const char * str, uint8_t row, uint8_t col) {
     OLED_ShowString(row, col, str);
 }
 
+// 1. 初始化静态成员变量
+volatile uint32_t SysTickTimer::msTicks = 0;
+
+// 2. 方法实现
+void SysTickTimer::Init() {
+    // SystemCoreClock 在 system_stm32f10x.c 中定义，通常为 72000000
+    // 配置 SysTick 为 1ms 中断一次
+    if (SysTick_Config(SystemCoreClock / 1000)) {
+        // 初始化失败处理（通常是时钟配置错误）
+        while (1);
+    }
+    // 默认 SysTick 优先级最低，如果需要提高优先级可在此配置
+    // NVIC_SetPriority(SysTick_IRQn, 0); 
+}
+
+uint32_t SysTickTimer::GetTick() {
+    return msTicks;
+}
+
+void SysTickTimer::DelayMs(uint32_t ms) {
+    uint32_t startTick = GetTick();
+    // 利用无符号整数溢出回绕特性，直接相减也是安全的
+    while ((GetTick() - startTick) < ms) {
+        // 空转等待
+    }
+}
+
+void SysTickTimer::IncTick() {
+    msTicks++;
+}
+
+// 3. 中断服务函数连接
+// 必须使用 extern "C" 防止 C++ 名称修饰，否则启动文件找不到该函数
+extern "C" {
+    void SysTick_Handler(void) {
+        SysTickTimer::IncTick();
+    }
+}
+
+
 namespace TIM {
     const std::array<TIM_TypeDef*, To_uint8(Index::END)> timArr = {TIM1, TIM2, TIM3, TIM4, TIM5, TIM6, TIM7, TIM8};
 

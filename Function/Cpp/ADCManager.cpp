@@ -1,4 +1,4 @@
-#include "ShowCPP.h"
+#include "ADCManager.h"
 #include "OLED.h"
 #include "GPIO.h"
 #include "Delay.h"
@@ -179,11 +179,16 @@ namespace NS_ADC
         if (!needOledRefresh) return;
         needOledRefresh = false;
 
-        // 以下逻辑原先在 TIM_IRQnHandler() 中执行；现在移到主循环执行
-        for (uint16_t i = 0; i < this->params.nbr_of_channels; i++) {
+        //2. 限制 OLED 刷新频率 (例如每 100ms 刷新一次)
+        if (SysTickTimer::GetTick() - lastOledRefreshTime > 100) {
+            lastOledRefreshTime = SysTickTimer::GetTick();
+            
+            // 执行耗时的 OLED 操作
+             for (uint16_t i = 0; i < this->params.nbr_of_channels; i++) {
             OLED_ShowNum(i + 1, 1, snapBuf[i], 4);
             this->currentBuf[i] = this->ShowVoltage(i + 1, 6, snapBuf[i], this->refValBuf[0], this->params.channels[i].gain);
             ShowBoardVal(i);
+            }
         }
     }
 

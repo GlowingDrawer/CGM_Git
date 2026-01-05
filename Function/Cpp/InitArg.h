@@ -30,6 +30,26 @@ const float PI = 3.1415926535f;
 enum class BaudRate:uint32_t {BAUD_9600 = 9600, BAUD_19200 = 19200, BAUD_38400 = 38400, BAUD_57600 = 57600, BAUD_115200 = 115200};
 enum class BufSize:uint16_t {BUF_32 = 32, BUF_64 = 64, BUF_128 = 128, BUF_256 = 256, BUF_END};
 
+class SysTickTimer {
+private:
+    // 静态成员变量，用于记录毫秒数
+    // volatile 必不可少，防止编译器优化
+    static volatile uint32_t msTicks;
+
+public:
+    // 初始化 SysTick，默认 1ms 中断一次
+    static void Init();
+
+    // 获取当前系统运行毫秒数
+    static uint32_t GetTick();
+
+    // 阻塞式延时（替代原来的 Delay_ms）
+    static void DelayMs(uint32_t ms);
+
+    // 供中断服务函数调用的计数接口（不要在普通代码中调用）
+    static void IncTick();
+};
+
 namespace CGM
 {   
     enum class ADC_GPIO:uint8_t{

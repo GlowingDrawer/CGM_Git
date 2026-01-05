@@ -116,6 +116,8 @@ namespace NS_ADC
         alignas(4) std::array<uint16_t, 16> dmaBuf; // DMA缓冲区（最多支持16通道）
         // 存储adc通道对应的电流值大小(单位：mA)
         std::array<double, 16> currentBuf;
+
+        uint32_t lastOledRefreshTime = 0;
         
         void GpioConfig();
         void DmaConfig();
