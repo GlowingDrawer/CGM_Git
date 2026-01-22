@@ -61,34 +61,25 @@ namespace NS_DAC {
         hw.dacChan = cfg.dacChan;
         hw.tim = cfg.tim;
 
-        // 1. 设置 DAC 触发源
         if (cfg.tim == nullptr) {
             hw.dacTrigger = DAC_Trigger_Software;
             hw.dmaChan = nullptr;
-            hw.timDmaSrc = TIM_DMA_Update; // 默认值
-            return; // Constant 模式不需要 DMA
+            hw.timDmaSrc = TIM_DMA_Update;
+            return;
         }
 
-        // 查找 DAC Trigger (TIMx -> DAC_Trigger)
+        // 查找 DAC Trigger
         hw.dacTrigger = DAC_Trigger_Software;
         for (const auto& map : timDacMap) {
             if (map.TIMx == cfg.tim) { hw.dacTrigger = map.trigger; break; }
         }
 
-        // 2. 【核心修正】正确设置 DMA Channel
-        // STM32F103 High-Density (RCT6) DAC DMA 映射是固定的：
-        // DAC_Channel_1 -> DMA2_Channel3
-        // DAC_Channel_2 -> DMA2_Channel4
-        if (hw.dacChan == DAC_Channel::CH1) {
-            hw.dmaChan = DMA2_Channel3;
-        } else if (hw.dacChan == DAC_Channel::CH2) {
-            hw.dmaChan = DMA2_Channel4;
-        } else {
-            hw.dmaChan = nullptr; // 异常保护
+        // 查找 DMA Channel
+        hw.dmaChan = nullptr;
+        hw.timDmaSrc = TIM_DMA_Update;
+        for (const auto& map : timDmaMap) {
+            if (map.TIMx == cfg.tim) { hw.dmaChan = map.DMA_Channel; break; }
         }
-
-        // 旧的查表代码是给 Timer 做 DMA 更新用的，不适用于 DAC_DMACmd 模式，已移除
-        hw.timDmaSrc = TIM_DMA_Update; 
     }
 
     void DAC_ChanController::InitAsCV(const CV_VoltParams& v, const CV_Params& c) {
@@ -139,8 +130,8 @@ namespace NS_DAC {
     void DAC_ChanController::SetupDMA() {
         if (!useDMA || hw.dmaChan == nullptr) return;
 
-        // 强制开启 DMA2 时钟，防止误判
-        RCC_AHBPeriphClockCmd(RCC_AHBPeriph_DMA2, ENABLE);
+        if (hw.dmaChan >= DMA2_Channel1) RCC_AHBPeriphClockCmd(RCC_AHBPeriph_DMA2, ENABLE);
+        else RCC_AHBPeriphClockCmd(RCC_AHBPeriph_DMA1, ENABLE);
 
         DMA_DeInit(hw.dmaChan);
         DMA_InitTypeDef dma;
@@ -166,25 +157,22 @@ namespace NS_DAC {
     void DAC_ChanController::SetupTIM(float period) {
         if (hw.tim == nullptr) return;
 
-        // Robust TIM init: reset registers and clear flags/counter each start.
-        // This avoids edge cases where the first START outputs only mid-code (2048)
-        // and the waveform begins only after STOP/START.
         if (hw.tim == TIM2) RCC_APB1PeriphClockCmd(RCC_APB1Periph_TIM2, ENABLE);
         if (hw.tim == TIM3) RCC_APB1PeriphClockCmd(RCC_APB1Periph_TIM3, ENABLE);
         if (hw.tim == TIM4) RCC_APB1PeriphClockCmd(RCC_APB1Periph_TIM4, ENABLE);
 
-        TIM::InitTIM(hw.tim, period);
+        TIM_TimeBaseInitTypeDef t;
+        t.TIM_Prescaler = 7200 - 1; // 10kHz (0.1ms)
+        t.TIM_Period = (uint16_t)(period * 10000.0f) - 1;
+        t.TIM_ClockDivision = TIM_CKD_DIV1;
+        t.TIM_CounterMode = TIM_CounterMode_Up;
 
+        TIM_TimeBaseInit(hw.tim, &t);
         TIM_SelectOutputTrigger(hw.tim, TIM_TRGOSource_Update);
 
-        
-
-        // Enable update interrupt (used for CV/DPV waveform stepping).
+        // 需要中断用于 CV/DPV 计算；DMA 触发也依赖更新事件
         TIM_ITConfig(hw.tim, TIM_IT_Update, ENABLE);
 
-        TIM_SetCounter(hw.tim, 0);
-        TIM_ClearITPendingBit(hw.tim, TIM_IT_Update);
-        
         TIM_Cmd(hw.tim, DISABLE);
     }
 
@@ -212,21 +200,23 @@ namespace NS_DAC {
         const bool needTim = (hw.tim != nullptr) && (mode == GenMode::CV_SCAN || mode == GenMode::DPV_PULSE);
 
         if (needTim) {
-            float period = 0.001f; // default 1ms (DPV)
+            float period = 0.001f; // 默认 1ms (DPV)
             if (mode == GenMode::CV_SCAN) {
                 period = dataMgr.GetCV().cvParams.duration;
                 if (period <= 0.0f) period = 0.001f;
             }
             SetupTIM(period);
 
-            // Clear any stale pending state BEFORE enabling.
-            TIM_SetCounter(hw.tim, 0);
-            TIM_ClearITPendingBit(hw.tim, TIM_IT_Update);
-            NVIC_ClearPendingIRQ(TIM_IRQnManage::GetIRQn(hw.tim, TIM::IT::UP));
-
-            // Enable timer, then force one UPDATE event to kick the trigger chain once.
+            // 使能定时器
             TIM_Cmd(hw.tim, ENABLE);
-            TIM_GenerateEvent(hw.tim, TIM_EventSource_Update);
+
+            // CV(DMA) 模式：需要立刻触发一次 UPDATE 事件，把初始值搬运到 DHR 并更新输出。
+            // 注意：此事件会置位 UIF，若不清除，后续注册 NVIC/回调可能导致“开机即多走一步”。
+            if (useDMA) {
+                TIM_GenerateEvent(hw.tim, TIM_EventSource_Update);
+                TIM_ClearITPendingBit(hw.tim, TIM_IT_Update);
+                NVIC_ClearPendingIRQ(TIM_IRQnManage::GetIRQn(hw.tim, TIM::IT::UP));
+            }
         }
 
         isPaused = false;
@@ -296,10 +286,10 @@ namespace NS_DAC {
     void SystemController::SetBiasConstantVal(uint16_t val) { cachedBiasConstantVal = val; }
 
     void SystemController::Start() {
-        // Start ADC first
+        // 先启动 ADC（包括显示节拍）
         NS_ADC::GetStaticADC().StartConversion();
 
-        // Init Scan channel based on cached params
+        // 使用缓存参数初始化 Scan 通道
         switch (currentMode) {
             case RunMode::CV:
                 DAC_Manager::Chan_Scan.InitAsCV(cachedCV_Volt, cachedCV_Params);
@@ -308,27 +298,20 @@ namespace NS_DAC {
                 DAC_Manager::Chan_Scan.InitAsDPV(cachedDPV_Params);
                 break;
             case RunMode::IT:
+                // IT：扫描通道输出独立的 scan 常量
                 DAC_Manager::Chan_Scan.InitAsConstant(cachedScanConstantVal);
                 break;
         }
 
-        // Bias channel: constant output
+        // 偏置通道：常量输出，不占用 TIM
         DAC_Manager::Chan_Constant.InitAsConstant(cachedBiasConstantVal);
-
-        // IMPORTANT: register/enable TIM2 update IRQ BEFORE starting the timer.
-        // This avoids a first-run edge case where Code12 stays at mid-code (2048)
-        // until the user performs STOP/START again.
-        if (currentMode == RunMode::CV || currentMode == RunMode::DPV) {
-            TIM_IRQnManage::Add(TIM2, TIM::IT::UP, [](){ DAC_Manager::Chan_Scan.TIM_IRQHandler(); }, 1, 1);
-            NVIC_ClearPendingIRQ(TIM_IRQnManage::GetIRQn(TIM2, TIM::IT::UP));
-        }
 
         DAC_Manager::Chan_Scan.Start();
         DAC_Manager::Chan_Constant.Start();
 
-        // Kick one UPDATE event after everything is running (safe even if redundant).
+        // 仅当需要定时中断的模式下注册 TIM2 更新中断
         if (currentMode == RunMode::CV || currentMode == RunMode::DPV) {
-            TIM_GenerateEvent(TIM2, TIM_EventSource_Update);
+            TIM_IRQnManage::Add(TIM2, TIM::IT::UP, [](){ DAC_Manager::Chan_Scan.TIM_IRQHandler(); }, 1, 1);
         }
 
         isRunning = true;

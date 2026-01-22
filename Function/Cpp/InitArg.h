@@ -5,7 +5,7 @@
 #include "SysTickTimer.h"
 #include <array>
 
-template <typename Enum_uint8>
+template <typename Enum_uint8> 
 constexpr auto To_uint8(Enum_uint8 e) ->uint8_t { return static_cast<uint8_t>(e); }
 
 template <typename Enum_uint16>
@@ -128,9 +128,9 @@ namespace CGM
             {
                 // PA1 20400        uric
                 AD_ChanParams(To_uint8(ADC_GPIO::PA1), 20400, ADC_SampleTime_55Cycles5, GainMode::RES_VALUE, VsMode::STATIC),                        
-                // PC0 4700         ascorbic
+                // PA6 4700         ascorbic
                 AD_ChanParams(To_uint8(ADC_GPIO::PA6), 4700, ADC_SampleTime_55Cycles5, GainMode::RES_VALUE, VsMode::STATIC),   
-                // PC1 200          glucose
+                // PA7 200          glucose
                 AD_ChanParams(To_uint8(ADC_GPIO::PA7), 200, ADC_SampleTime_55Cycles5, GainMode::RES_VALUE, VsMode::STATIC),    
             }
         };

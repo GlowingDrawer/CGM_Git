@@ -61,34 +61,25 @@ namespace NS_DAC {
         hw.dacChan = cfg.dacChan;
         hw.tim = cfg.tim;
 
-        // 1. 设置 DAC 触发源
         if (cfg.tim == nullptr) {
             hw.dacTrigger = DAC_Trigger_Software;
             hw.dmaChan = nullptr;
-            hw.timDmaSrc = TIM_DMA_Update; // 默认值
-            return; // Constant 模式不需要 DMA
+            hw.timDmaSrc = TIM_DMA_Update;
+            return;
         }
 
-        // 查找 DAC Trigger (TIMx -> DAC_Trigger)
+        // 查找 DAC Trigger
         hw.dacTrigger = DAC_Trigger_Software;
         for (const auto& map : timDacMap) {
             if (map.TIMx == cfg.tim) { hw.dacTrigger = map.trigger; break; }
         }
 
-        // 2. 【核心修正】正确设置 DMA Channel
-        // STM32F103 High-Density (RCT6) DAC DMA 映射是固定的：
-        // DAC_Channel_1 -> DMA2_Channel3
-        // DAC_Channel_2 -> DMA2_Channel4
-        if (hw.dacChan == DAC_Channel::CH1) {
-            hw.dmaChan = DMA2_Channel3;
-        } else if (hw.dacChan == DAC_Channel::CH2) {
-            hw.dmaChan = DMA2_Channel4;
-        } else {
-            hw.dmaChan = nullptr; // 异常保护
+        // 查找 DMA Channel
+        hw.dmaChan = nullptr;
+        hw.timDmaSrc = TIM_DMA_Update;
+        for (const auto& map : timDmaMap) {
+            if (map.TIMx == cfg.tim) { hw.dmaChan = map.DMA_Channel; break; }
         }
-
-        // 旧的查表代码是给 Timer 做 DMA 更新用的，不适用于 DAC_DMACmd 模式，已移除
-        hw.timDmaSrc = TIM_DMA_Update; 
     }
 
     void DAC_ChanController::InitAsCV(const CV_VoltParams& v, const CV_Params& c) {
@@ -139,8 +130,8 @@ namespace NS_DAC {
     void DAC_ChanController::SetupDMA() {
         if (!useDMA || hw.dmaChan == nullptr) return;
 
-        // 强制开启 DMA2 时钟，防止误判
-        RCC_AHBPeriphClockCmd(RCC_AHBPeriph_DMA2, ENABLE);
+        if (hw.dmaChan >= DMA2_Channel1) RCC_AHBPeriphClockCmd(RCC_AHBPeriph_DMA2, ENABLE);
+        else RCC_AHBPeriphClockCmd(RCC_AHBPeriph_DMA1, ENABLE);
 
         DMA_DeInit(hw.dmaChan);
         DMA_InitTypeDef dma;
@@ -173,18 +164,27 @@ namespace NS_DAC {
         if (hw.tim == TIM3) RCC_APB1PeriphClockCmd(RCC_APB1Periph_TIM3, ENABLE);
         if (hw.tim == TIM4) RCC_APB1PeriphClockCmd(RCC_APB1Periph_TIM4, ENABLE);
 
-        TIM::InitTIM(hw.tim, period);
+        TIM_DeInit(hw.tim);
 
+        TIM_TimeBaseInitTypeDef t;
+        TIM_TimeBaseStructInit(&t);
+        t.TIM_Prescaler = 7200 - 1; // 10kHz tick (0.1ms)
+        // Clamp to [1, 65536] ticks to prevent underflow/overflow.
+        unsigned int ticks = (unsigned int)(period * 10000.0f + 0.5f);
+        if (ticks < 1u) ticks = 1u;
+        if (ticks > 65536u) ticks = 65536u;
+        t.TIM_Period = (uint16_t)(ticks - 1u);
+        t.TIM_ClockDivision = TIM_CKD_DIV1;
+        t.TIM_CounterMode = TIM_CounterMode_Up;
+
+        TIM_TimeBaseInit(hw.tim, &t);
         TIM_SelectOutputTrigger(hw.tim, TIM_TRGOSource_Update);
-
-        
 
         // Enable update interrupt (used for CV/DPV waveform stepping).
         TIM_ITConfig(hw.tim, TIM_IT_Update, ENABLE);
 
         TIM_SetCounter(hw.tim, 0);
         TIM_ClearITPendingBit(hw.tim, TIM_IT_Update);
-        
         TIM_Cmd(hw.tim, DISABLE);
     }
 
